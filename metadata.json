@@ -1,0 +1,5 @@
+{
+  "name": "FluoroSight: Advanced Cell Imaging Suite",
+  "description": "A high-precision image processing tool designed for researchers to enhance and analyze faint fluorescent cell signals using deterministic pixel manipulation and real-time histogram analysis.",
+  "requestFramePermissions": []
+}
