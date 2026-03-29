@@ -26,7 +26,8 @@ const App: React.FC = () => {
   const [viewMode, setViewMode] = useState<'single' | 'split'>('split');
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [isZipping, setIsZipping] = useState(false);
-  
+  const [exportProgress, setExportProgress] = useState(0);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -129,23 +130,48 @@ const App: React.FC = () => {
 
   const downloadAllAsZip = async () => {
     if (images.length === 0) return;
+    const total = images.length;
     setIsZipping(true);
-    const zip = new JSZip();
+    setExportProgress(0);
 
-    for (const entry of images) {
-      // Process each image using fixed current parameters
-      const dataUrl = processSingleImage(entry, params);
-      const base64Data = dataUrl.split(',')[1];
-      const filename = entry.name.replace(/\.[^/.]+$/, "") + "_enhanced.png";
-      zip.file(filename, base64Data, { base64: true });
+    const waitForPaint = () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      });
+
+    const yieldToMain = () => new Promise<void>((r) => setTimeout(r, 0));
+
+    try {
+      await waitForPaint();
+
+      const zip = new JSZip();
+
+      for (let i = 0; i < images.length; i++) {
+        const entry = images[i];
+        const dataUrl = processSingleImage(entry, params);
+        const base64Data = dataUrl.split(',')[1];
+        const filename = entry.name.replace(/\.[^/.]+$/, "") + "_enhanced.png";
+        zip.file(filename, base64Data, { base64: true });
+        setExportProgress(Math.round(((i + 1) / total) * 70));
+        await yieldToMain();
+      }
+
+      const content = await zip.generateAsync({ type: 'blob' }, (meta) => {
+        const p = typeof meta.percent === 'number' ? meta.percent : 0;
+        setExportProgress(70 + Math.round((p / 100) * 30));
+      });
+
+      const blobUrl = URL.createObjectURL(content);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = `FluoroSight_Export_${Date.now()}.zip`;
+      link.click();
+      URL.revokeObjectURL(blobUrl);
+      setExportProgress(100);
+    } finally {
+      setIsZipping(false);
+      setExportProgress(0);
     }
-
-    const content = await zip.generateAsync({ type: 'blob' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(content);
-    link.download = `FluoroSight_Export_${Date.now()}.zip`;
-    link.click();
-    setIsZipping(false);
   };
 
   const deleteImage = (id: string, e: React.MouseEvent) => {
@@ -249,10 +275,18 @@ const App: React.FC = () => {
                 </span>
               )}
               {isZipping && (
-                <span className="flex items-center gap-2 text-xs text-blue-400">
-                  <i className="fas fa-file-archive animate-pulse"></i>
-                  Archiving All...
-                </span>
+                <div className="flex flex-col gap-1.5 min-w-[200px] max-w-xs">
+                  <span className="flex items-center gap-2 text-xs text-blue-400">
+                    <i className="fas fa-file-archive animate-pulse"></i>
+                    Exporting… {exportProgress}%
+                  </span>
+                  <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-blue-500 transition-[width] duration-150 ease-out"
+                      style={{ width: `${exportProgress}%` }}
+                    />
+                  </div>
+                </div>
               )}
               <div className="h-4 w-px bg-slate-800 mx-2"></div>
               <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded-full border border-slate-800">
