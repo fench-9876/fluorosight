@@ -8,12 +8,46 @@ import { buildPresetPayload, parsePresetJson } from './services/paramPreset';
 import Controls from './components/Controls';
 import Histogram from './components/Histogram';
 
+/** Longest edge for preview processing (full resolution still used for export). */
+const PREVIEW_MAX_EDGE = 1152;
+
+function createPreviewImageData(full: ImageData, maxEdge: number): ImageData {
+  const w = full.width;
+  const h = full.height;
+  if (w <= 0 || h <= 0) return full;
+  const scale = Math.min(1, maxEdge / Math.max(w, h));
+  if (scale >= 1) {
+    return new ImageData(new Uint8ClampedArray(full.data), w, h);
+  }
+  const pw = Math.max(1, Math.round(w * scale));
+  const ph = Math.max(1, Math.round(h * scale));
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = w;
+  srcCanvas.height = h;
+  const sctx = srcCanvas.getContext('2d', { willReadFrequently: true });
+  if (!sctx) return full;
+  sctx.putImageData(full, 0, 0);
+  const dstCanvas = document.createElement('canvas');
+  dstCanvas.width = pw;
+  dstCanvas.height = ph;
+  const dctx = dstCanvas.getContext('2d', { willReadFrequently: true });
+  if (!dctx) return full;
+  dctx.imageSmoothingEnabled = true;
+  dctx.imageSmoothingQuality = 'high';
+  dctx.drawImage(srcCanvas, 0, 0, w, h, 0, 0, pw, ph);
+  return dctx.getImageData(0, 0, pw, ph);
+}
+
 interface ImageEntry {
   id: string;
   name: string;
   originalData: ImageData;
   width: number;
   height: number;
+  /** Downscaled RGBA for preview pipeline only. */
+  previewOriginal: ImageData;
+  previewWidth: number;
+  previewHeight: number;
   rawUrl: string;
   processedUrl: string | null;
 }
@@ -22,6 +56,7 @@ const App: React.FC = () => {
   const [images, setImages] = useState<ImageEntry[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
   const [params, setParams] = useState<ProcessingParams>(INITIAL_PARAMS);
+  const [previewParams, setPreviewParams] = useState<ProcessingParams>(INITIAL_PARAMS);
   const [histogram, setHistogram] = useState<number[]>(new Array(256).fill(0));
   const [isProcessing, setIsProcessing] = useState(false);
   const [viewMode, setViewMode] = useState<'single' | 'split'>('split');
@@ -33,8 +68,21 @@ const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const paramsPresetInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const previewDebounceImageIdRef = useRef<string | null>(null);
 
   const selectedImage = useMemo(() => images[selectedIndex] || null, [images, selectedIndex]);
+
+  useEffect(() => {
+    const imageId = selectedImage?.id ?? null;
+    const imageChanged = imageId !== previewDebounceImageIdRef.current;
+    if (imageChanged) {
+      previewDebounceImageIdRef.current = imageId;
+      setPreviewParams(params);
+      return;
+    }
+    const t = window.setTimeout(() => setPreviewParams(params), 200);
+    return () => window.clearTimeout(t);
+  }, [params, selectedImage?.id]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -55,12 +103,16 @@ const App: React.FC = () => {
             if (ctx) {
               ctx.drawImage(img, 0, 0);
               const data = ctx.getImageData(0, 0, img.width, img.height);
+              const previewOriginal = createPreviewImageData(data, PREVIEW_MAX_EDGE);
               resolve({
                 id: Math.random().toString(36).substr(2, 9),
                 name: file.name,
                 originalData: data,
                 width: img.width,
                 height: img.height,
+                previewOriginal,
+                previewWidth: previewOriginal.width,
+                previewHeight: previewOriginal.height,
                 rawUrl: event.target?.result as string,
                 processedUrl: null
               });
@@ -109,22 +161,22 @@ const App: React.FC = () => {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
-    const { width, height, originalData } = selectedImage;
-    canvasRef.current.width = width;
-    canvasRef.current.height = height;
+    const { previewWidth, previewHeight, previewOriginal } = selectedImage;
+    canvasRef.current.width = previewWidth;
+    canvasRef.current.height = previewHeight;
 
     const processedPixels = processImageData(
-      originalData.data,
-      width,
-      height,
-      params
+      previewOriginal.data,
+      previewWidth,
+      previewHeight,
+      previewParams
     );
 
-    const processedImageData = new ImageData(processedPixels, width, height);
+    const processedImageData = new ImageData(processedPixels, previewWidth, previewHeight);
     ctx.putImageData(processedImageData, 0, 0);
     setHistogram(getHistogram(processedPixels));
     setIsProcessing(false);
-  }, [selectedImage, params]);
+  }, [selectedImage, previewParams]);
 
   useEffect(() => {
     updateProcessedView();
@@ -492,7 +544,11 @@ const App: React.FC = () => {
                 <div className="p-3 rounded-xl bg-slate-900/50 border border-slate-800 flex flex-col justify-center">
                    <span className="text-[9px] text-slate-500 uppercase font-bold mb-1 tracking-wider">Mean Intensity</span>
                    <span className="text-lg font-mono text-slate-200">
-                     {(histogram.reduce((acc, c, i) => acc + c * i, 0) / (selectedImage ? selectedImage.width * selectedImage.height : 1)).toFixed(2)}
+                     {(() => {
+                       const weighted = histogram.reduce((acc, c, i) => acc + c * i, 0);
+                       const total = histogram.reduce((acc, c) => acc + c, 0);
+                       return total > 0 ? (weighted / total).toFixed(2) : '0.00';
+                     })()}
                    </span>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-900/50 border border-slate-800 flex flex-col justify-center">
