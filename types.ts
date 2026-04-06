@@ -16,6 +16,7 @@ export interface ProcessingParams {
 }
 
 export enum ColorMapType {
+  ORIGINAL = 'original',
   GRAYSCALE = 'grayscale',
   VIRIDIS = 'viridis',
   MAGMA = 'magma',

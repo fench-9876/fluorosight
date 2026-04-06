@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 import { ProcessingParams, ColorMapType } from './types';
 import { INITIAL_PARAMS } from './constants';
 import { processImageData, getHistogram } from './services/imageUtils';
+import { buildPresetPayload, parsePresetJson } from './services/paramPreset';
 import Controls from './components/Controls';
 import Histogram from './components/Histogram';
 
@@ -30,6 +31,7 @@ const App: React.FC = () => {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const paramsPresetInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const selectedImage = useMemo(() => images[selectedIndex] || null, [images, selectedIndex]);
@@ -197,6 +199,63 @@ const App: React.FC = () => {
     }
   };
 
+  const handleParamsPresetFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = typeof reader.result === 'string' ? reader.result : '';
+      const parsed = parsePresetJson(text);
+      if (parsed) {
+        setParams(parsed);
+      } else {
+        alert('Invalid preset file. Choose a valid FluoroSight JSON preset.');
+      }
+      if (paramsPresetInputRef.current) paramsPresetInputRef.current.value = '';
+    };
+    reader.readAsText(file);
+  };
+
+  const exportParamsPreset = async () => {
+    const json = buildPresetPayload(params);
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const suggestedName = 'fluorosight-preset.json';
+
+    const w = window as Window & {
+      showSaveFilePicker?: (options?: {
+        suggestedName?: string;
+        types?: Array<{ description: string; accept: Record<string, string[]> }>;
+      }) => Promise<FileSystemFileHandle>;
+    };
+
+    if (typeof w.showSaveFilePicker === 'function') {
+      try {
+        const handle = await w.showSaveFilePicker({
+          suggestedName: suggestedName,
+          types: [
+            {
+              description: 'FluoroSight preset',
+              accept: { 'application/json': ['.json'] },
+            },
+          ],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+      }
+    }
+
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = suggestedName;
+    link.click();
+    URL.revokeObjectURL(blobUrl);
+  };
+
   return (
     <div ref={containerRef} className="flex h-screen w-screen overflow-hidden bg-slate-950 font-sans transition-all duration-500">
       {/* Sidebar / Left UI */}
@@ -212,6 +271,24 @@ const App: React.FC = () => {
             title="Upload Multiple Images"
           >
             <i className="fas fa-plus text-lg"></i>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => paramsPresetInputRef.current?.click()}
+            className="w-12 h-12 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-all"
+            title="Load parameter preset (JSON). Chrome/Edge: pick a file. Use before or after uploading images."
+          >
+            <i className="fas fa-file-import text-lg"></i>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void exportParamsPreset()}
+            className="w-12 h-12 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-all"
+            title="Export parameters as JSON. Chrome/Edge: Save As dialog; other browsers: downloads fluorosight-preset.json."
+          >
+            <i className="fas fa-file-export text-lg"></i>
           </button>
 
           <button 
@@ -246,6 +323,13 @@ const App: React.FC = () => {
             multiple
             onChange={handleFileUpload} 
             className="hidden" 
+          />
+          <input
+            ref={paramsPresetInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleParamsPresetFile}
+            className="hidden"
           />
         </div>
       )}
@@ -318,12 +402,23 @@ const App: React.FC = () => {
               </div>
               <h3 className="text-xl font-semibold text-slate-200">Batch Signal Enhancement</h3>
               <p className="text-sm text-slate-500">Upload multiple cell microscopy images to process them all with fixed enhancement parameters.</p>
-              <button 
-                onClick={() => fileInputRef.current?.click()}
-                className="mt-4 px-6 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium transition-all shadow-lg shadow-emerald-500/20"
-              >
-                Upload Images
-              </button>
+              <div className="mt-4 flex flex-col sm:flex-row items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-6 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium transition-all shadow-lg shadow-emerald-500/20"
+                >
+                  Upload Images
+                </button>
+                <button
+                  type="button"
+                  onClick={() => paramsPresetInputRef.current?.click()}
+                  className="px-6 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 rounded-lg text-sm font-medium transition-all"
+                  title="Load a saved JSON preset before uploading so the same parameters apply to new images."
+                >
+                  Load preset (JSON)
+                </button>
+              </div>
             </div>
           ) : (
             <div className={`flex w-full h-full ${isFocusMode ? 'gap-0' : 'gap-8'} ${viewMode === 'split' ? 'items-stretch' : 'items-center justify-center'} transition-all duration-500`}>
