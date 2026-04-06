@@ -1,5 +1,6 @@
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { flushSync } from 'react-dom';
 import JSZip from 'jszip';
 import { ProcessingParams, ColorMapType } from './types';
 import { INITIAL_PARAMS } from './constants';
@@ -8,48 +9,74 @@ import { buildPresetPayload, parsePresetJson } from './services/paramPreset';
 import Controls from './components/Controls';
 import Histogram from './components/Histogram';
 
-/** Longest edge for preview processing (full resolution still used for export). */
+/** Longest edge for preview processing; full resolution is decoded only for export. */
 const PREVIEW_MAX_EDGE = 1152;
 
-function createPreviewImageData(full: ImageData, maxEdge: number): ImageData {
-  const w = full.width;
-  const h = full.height;
-  if (w <= 0 || h <= 0) return full;
+type ImagePreview = {
+  original: ImageData;
+  width: number;
+  height: number;
+};
+
+/** Scaled draw only — avoids full-resolution ImageData while loading. */
+function createPreviewImageDataFromImage(img: HTMLImageElement, maxEdge: number): ImageData {
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  if (w <= 0 || h <= 0) return new ImageData(1, 1);
   const scale = Math.min(1, maxEdge / Math.max(w, h));
-  if (scale >= 1) {
-    return new ImageData(new Uint8ClampedArray(full.data), w, h);
-  }
   const pw = Math.max(1, Math.round(w * scale));
   const ph = Math.max(1, Math.round(h * scale));
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width = w;
-  srcCanvas.height = h;
-  const sctx = srcCanvas.getContext('2d', { willReadFrequently: true });
-  if (!sctx) return full;
-  sctx.putImageData(full, 0, 0);
-  const dstCanvas = document.createElement('canvas');
-  dstCanvas.width = pw;
-  dstCanvas.height = ph;
-  const dctx = dstCanvas.getContext('2d', { willReadFrequently: true });
-  if (!dctx) return full;
-  dctx.imageSmoothingEnabled = true;
-  dctx.imageSmoothingQuality = 'high';
-  dctx.drawImage(srcCanvas, 0, 0, w, h, 0, 0, pw, ph);
-  return dctx.getImageData(0, 0, pw, ph);
+  const canvas = document.createElement('canvas');
+  canvas.width = pw;
+  canvas.height = ph;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return new ImageData(1, 1);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, w, h, 0, 0, pw, ph);
+  return ctx.getImageData(0, 0, pw, ph);
+}
+
+function loadFullImageData(objectUrl: string, width: number, height: number): Promise<ImageData | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) {
+        resolve(null);
+        return;
+      }
+      ctx.drawImage(img, 0, 0);
+      resolve(ctx.getImageData(0, 0, width, height));
+    };
+    img.onerror = () => resolve(null);
+    img.src = objectUrl;
+  });
+}
+
+function loadPreviewFromObjectUrl(objectUrl: string): Promise<ImagePreview | undefined> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const original = createPreviewImageDataFromImage(img, PREVIEW_MAX_EDGE);
+      resolve({ original, width: original.width, height: original.height });
+    };
+    img.onerror = () => resolve(undefined);
+    img.src = objectUrl;
+  });
 }
 
 interface ImageEntry {
   id: string;
   name: string;
-  originalData: ImageData;
+  objectUrl: string;
   width: number;
   height: number;
-  /** Downscaled RGBA for preview pipeline only. */
-  previewOriginal: ImageData;
-  previewWidth: number;
-  previewHeight: number;
-  rawUrl: string;
-  processedUrl: string | null;
+  /** Dropped during ZIP export so preview buffers can be GC'd. */
+  preview?: ImagePreview;
 }
 
 const App: React.FC = () => {
@@ -69,8 +96,18 @@ const App: React.FC = () => {
   const paramsPresetInputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const previewDebounceImageIdRef = useRef<string | null>(null);
+  const imagesRef = useRef<ImageEntry[]>([]);
+  imagesRef.current = images;
 
   const selectedImage = useMemo(() => images[selectedIndex] || null, [images, selectedIndex]);
+
+  useEffect(() => {
+    return () => {
+      for (const img of imagesRef.current) {
+        URL.revokeObjectURL(img.objectUrl);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const imageId = selectedImage?.id ?? null;
@@ -89,84 +126,85 @@ const App: React.FC = () => {
     if (!files || files.length === 0) return;
 
     const newEntries: ImageEntry[] = [];
-    
+
     for (const file of Array.from(files)) {
-      const entry = await new Promise<ImageEntry>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (event) => {
+      const objectUrl = URL.createObjectURL(file);
+      try {
+        const entry = await new Promise<ImageEntry>((resolve, reject) => {
           const img = new Image();
           img.onload = () => {
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = img.width;
-            tempCanvas.height = img.height;
-            const ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
-            if (ctx) {
-              ctx.drawImage(img, 0, 0);
-              const data = ctx.getImageData(0, 0, img.width, img.height);
-              const previewOriginal = createPreviewImageData(data, PREVIEW_MAX_EDGE);
-              resolve({
-                id: Math.random().toString(36).substr(2, 9),
-                name: file.name,
-                originalData: data,
-                width: img.width,
-                height: img.height,
-                previewOriginal,
-                previewWidth: previewOriginal.width,
-                previewHeight: previewOriginal.height,
-                rawUrl: event.target?.result as string,
-                processedUrl: null
-              });
-            }
+            const w = img.naturalWidth;
+            const h = img.naturalHeight;
+            const original = createPreviewImageDataFromImage(img, PREVIEW_MAX_EDGE);
+            resolve({
+              id: Math.random().toString(36).substr(2, 9),
+              name: file.name,
+              objectUrl,
+              width: w,
+              height: h,
+              preview: { original, width: original.width, height: original.height },
+            });
           };
-          img.src = event.target?.result as string;
-        };
-        reader.readAsDataURL(file);
-      });
-      newEntries.push(entry);
+          img.onerror = () => {
+            URL.revokeObjectURL(objectUrl);
+            reject(new Error('Failed to decode image'));
+          };
+          img.src = objectUrl;
+        });
+        newEntries.push(entry);
+      } catch {
+        /* skip corrupt / undecodable file */
+      }
     }
 
-    setImages(prev => [...prev, ...newEntries]);
+    setImages((prev) => [...prev, ...newEntries]);
     if (images.length === 0) setSelectedIndex(0);
-    // Clear input
     e.target.value = '';
   };
 
-  const processSingleImage = (entry: ImageEntry, parameters: ProcessingParams): string => {
+  const processSingleImage = (
+    originalData: ImageData,
+    width: number,
+    height: number,
+    parameters: ProcessingParams
+  ): string => {
     const canvas = document.createElement('canvas');
-    canvas.width = entry.width;
-    canvas.height = entry.height;
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) return '';
 
     const processedPixels = processImageData(
-      entry.originalData.data,
-      entry.width,
-      entry.height,
+      originalData.data,
+      width,
+      height,
       parameters
     );
 
-    const processedImageData = new ImageData(processedPixels, entry.width, entry.height);
+    const processedImageData = new ImageData(processedPixels, width, height);
     ctx.putImageData(processedImageData, 0, 0);
     return canvas.toDataURL('image/png');
   };
 
   const updateProcessedView = useCallback(() => {
     if (!selectedImage || !canvasRef.current) return;
+    const preview = selectedImage.preview;
+    if (!preview) return;
+
     setIsProcessing(true);
 
     const ctx = canvasRef.current.getContext('2d');
     if (!ctx) return;
 
-    // Enable high-quality smoothing for the viewer
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
-    const { previewWidth, previewHeight, previewOriginal } = selectedImage;
+    const { width: previewWidth, height: previewHeight, original } = preview;
     canvasRef.current.width = previewWidth;
     canvasRef.current.height = previewHeight;
 
     const processedPixels = processImageData(
-      previewOriginal.data,
+      original.data,
       previewWidth,
       previewHeight,
       previewParams
@@ -184,7 +222,16 @@ const App: React.FC = () => {
 
   const downloadAllAsZip = async () => {
     if (images.length === 0) return;
-    const total = images.length;
+
+    const exportRows = images.map(({ id, name, objectUrl, width, height }) => ({
+      id,
+      name,
+      objectUrl,
+      width,
+      height,
+    }));
+    const total = exportRows.length;
+
     setIsZipping(true);
     setExportProgress(0);
 
@@ -196,15 +243,21 @@ const App: React.FC = () => {
     const yieldToMain = () => new Promise<void>((r) => setTimeout(r, 0));
 
     try {
+      flushSync(() => {
+        setImages(exportRows);
+      });
+
       await waitForPaint();
 
       const zip = new JSZip();
 
-      for (let i = 0; i < images.length; i++) {
-        const entry = images[i];
-        const dataUrl = processSingleImage(entry, params);
+      for (let i = 0; i < exportRows.length; i++) {
+        const row = exportRows[i];
+        const full = await loadFullImageData(row.objectUrl, row.width, row.height);
+        if (!full) continue;
+        const dataUrl = processSingleImage(full, row.width, row.height, params);
         const base64Data = dataUrl.split(',')[1];
-        const filename = entry.name.replace(/\.[^/.]+$/, "") + "_enhanced.png";
+        const filename = row.name.replace(/\.[^/.]+$/, '') + '_enhanced.png';
         zip.file(filename, base64Data, { base64: true });
         setExportProgress(Math.round(((i + 1) / total) * 70));
         await yieldToMain();
@@ -225,15 +278,25 @@ const App: React.FC = () => {
     } finally {
       setIsZipping(false);
       setExportProgress(0);
+      const restored = await Promise.all(
+        exportRows.map(async (r) => ({
+          ...r,
+          preview: await loadPreviewFromObjectUrl(r.objectUrl),
+        }))
+      );
+      setImages(restored);
     }
   };
 
   const deleteImage = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    const idx = images.findIndex(img => img.id === id);
+    const idx = images.findIndex((img) => img.id === id);
     if (idx === -1) return;
-    
-    setImages(prev => prev.filter(img => img.id !== id));
+
+    const victim = images[idx];
+    URL.revokeObjectURL(victim.objectUrl);
+
+    setImages((prev) => prev.filter((img) => img.id !== id));
     if (selectedIndex >= images.length - 1) {
       setSelectedIndex(Math.max(0, images.length - 2));
     }
@@ -319,7 +382,8 @@ const App: React.FC = () => {
           
           <button 
             onClick={() => fileInputRef.current?.click()}
-            className="w-12 h-12 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-all group"
+            disabled={isZipping}
+            className="w-12 h-12 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-all group disabled:opacity-30 disabled:cursor-not-allowed"
             title="Upload Multiple Images"
           >
             <i className="fas fa-plus text-lg"></i>
@@ -373,7 +437,8 @@ const App: React.FC = () => {
             type="file" 
             accept="image/*" 
             multiple
-            onChange={handleFileUpload} 
+            onChange={handleFileUpload}
+            disabled={isZipping}
             className="hidden" 
           />
           <input
@@ -458,7 +523,8 @@ const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="px-6 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium transition-all shadow-lg shadow-emerald-500/20"
+                  disabled={isZipping}
+                  className="px-6 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-sm font-medium transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Upload Images
                 </button>
@@ -482,7 +548,7 @@ const App: React.FC = () => {
                     </div>
                   )}
                   <div className="flex-1 flex items-center justify-center p-4">
-                    <img src={selectedImage.rawUrl} className="max-w-full max-h-full object-contain" alt="Raw" />
+                    <img src={selectedImage.objectUrl} className="max-w-full max-h-full object-contain" alt="Raw" />
                   </div>
                 </div>
               )}
@@ -515,7 +581,7 @@ const App: React.FC = () => {
                   onClick={() => setSelectedIndex(idx)}
                   className={`group relative h-16 min-w-[64px] rounded-lg border-2 cursor-pointer transition-all ${selectedIndex === idx ? 'border-emerald-500 scale-105 shadow-lg shadow-emerald-500/20' : 'border-slate-800 hover:border-slate-600'}`}
                 >
-                  <img src={img.rawUrl} className="w-full h-full object-cover rounded-md" />
+                  <img src={img.objectUrl} className="w-full h-full object-cover rounded-md" />
                   <button 
                     onClick={(e) => deleteImage(img.id, e)}
                     className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center text-[10px] text-white opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
@@ -528,8 +594,10 @@ const App: React.FC = () => {
                 </div>
               ))}
               <button 
+                type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="h-16 min-w-[64px] border-2 border-dashed border-slate-700 rounded-lg flex items-center justify-center text-slate-600 hover:text-emerald-500 hover:border-emerald-500/50 transition-all"
+                disabled={isZipping}
+                className="h-16 min-w-[64px] border-2 border-dashed border-slate-700 rounded-lg flex items-center justify-center text-slate-600 hover:text-emerald-500 hover:border-emerald-500/50 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <i className="fas fa-plus"></i>
               </button>
