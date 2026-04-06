@@ -156,15 +156,36 @@ export const processImageData = (
   // 9. Output Mapping
   const outputData = new Uint8ClampedArray(originalData.length);
   const mapper = COLOR_MAPS[colorMap];
+  const preserveOriginal = colorMap === ColorMapType.ORIGINAL;
+  const lumEps = 1;
+  const maxScale = 256;
 
   for (let i = 0; i < size; i++) {
     const val = Math.max(0, Math.min(255, intensities[i]));
     const corrected = lut[Math.floor(val)];
-    const [r, g, b] = mapper(corrected);
     const outIdx = i * 4;
-    outputData[outIdx] = r;
-    outputData[outIdx + 1] = g;
-    outputData[outIdx + 2] = b;
+
+    if (preserveOriginal) {
+      const r0 = originalData[outIdx];
+      const g0 = originalData[outIdx + 1];
+      const b0 = originalData[outIdx + 2];
+      const lIn = (r0 + g0 + b0) / 3;
+      if (lIn < lumEps) {
+        outputData[outIdx] = 0;
+        outputData[outIdx + 1] = 0;
+        outputData[outIdx + 2] = 0;
+      } else {
+        const scale = Math.min(maxScale, corrected / lIn);
+        outputData[outIdx] = Math.max(0, Math.min(255, Math.round(r0 * scale)));
+        outputData[outIdx + 1] = Math.max(0, Math.min(255, Math.round(g0 * scale)));
+        outputData[outIdx + 2] = Math.max(0, Math.min(255, Math.round(b0 * scale)));
+      }
+    } else {
+      const [r, g, b] = mapper(corrected);
+      outputData[outIdx] = r;
+      outputData[outIdx + 1] = g;
+      outputData[outIdx + 2] = b;
+    }
     outputData[outIdx + 3] = 255;
   }
 

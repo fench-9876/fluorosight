@@ -14,10 +14,11 @@ export const INITIAL_PARAMS = {
   outlineEnhance: 0,
   selectiveGain: 0,
   gainThreshold: 10,
-  colorMap: ColorMapType.GREEN
+  colorMap: ColorMapType.ORIGINAL
 };
 
 export const COLOR_MAPS: Record<ColorMapType, (v: number) => [number, number, number]> = {
+  [ColorMapType.ORIGINAL]: (v) => [v, v, v],
   [ColorMapType.GRAYSCALE]: (v) => [v, v, v],
   [ColorMapType.GREEN]: (v) => [0, v, 0],
   [ColorMapType.RED]: (v) => [v, 0, 0],

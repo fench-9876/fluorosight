@@ -46,6 +46,10 @@ const Slider: React.FC<{
   </div>
 );
 
+const COLOR_MAP_LABELS: Partial<Record<ColorMapType, string>> = {
+  [ColorMapType.ORIGINAL]: 'Original',
+};
+
 const Controls: React.FC<ControlsProps> = ({ params, onChange, onReset }) => {
   return (
     <div className="w-80 bg-slate-900 border-l border-white/5 h-full overflow-y-auto p-6 scrollbar-hide shadow-2xl z-20">
@@ -185,7 +189,7 @@ const Controls: React.FC<ControlsProps> = ({ params, onChange, onReset }) => {
                   : 'bg-slate-800 border-slate-700 text-slate-500 hover:border-slate-600 hover:text-slate-300'
               }`}
             >
-              {map}
+              {COLOR_MAP_LABELS[map] ?? map}
             </button>
           ))}
         </div>
