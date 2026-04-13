@@ -21,8 +21,12 @@ export type ImagePreview = {
   height: number;
 };
 
-function canvasToJpegDataUrl(canvas: HTMLCanvasElement, quality = 0.85): string {
-  return canvas.toDataURL('image/jpeg', quality);
+/** JPEG blob URL for gallery thumbnails (avoids large base64 strings on the JS heap). */
+async function canvasToJpegObjectUrl(canvas: HTMLCanvasElement, quality = 0.85): Promise<string> {
+  const blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob((b) => resolve(b), 'image/jpeg', quality)
+  );
+  return blob ? URL.createObjectURL(blob) : '';
 }
 
 /**
@@ -36,7 +40,7 @@ export async function decodeImageFile(
     try {
       const buffer = await file.arrayBuffer();
       const { width, height, rgba } = decodeTiff(buffer);
-      const copy = new Uint8ClampedArray(rgba);
+      const copy = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength);
       const imageData = new ImageData(copy, width, height);
       const bitmap = await createImageBitmap(imageData);
       return { bitmap, width, height };
@@ -81,14 +85,13 @@ function drawBitmapToCanvas(
 }
 
 /**
- * Gallery thumbnail (JPEG data URL) + display URL for RAW panel.
- * For TIFF, displayUrl is a PNG object URL at preview resolution.
+ * Gallery thumbnail (JPEG blob URL) + original file object URL for display metadata.
+ * TIFF RAW preview is loaded lazily in the app (see generateTiffRawDisplayUrl).
  */
 export async function generateThumbnail(
   file: File,
   format: ImageFormat,
-  objectUrl: string,
-  previewMaxEdge: number
+  objectUrl: string
 ): Promise<{
   thumbnailUrl: string;
   displayUrl: string;
@@ -98,20 +101,24 @@ export async function generateThumbnail(
   const { bitmap, width, height } = await decodeImageFile(file, format);
   try {
     const thumb = drawBitmapToCanvas(bitmap, THUMBNAIL_MAX_EDGE);
-    const thumbnailUrl = canvasToJpegDataUrl(thumb.canvas, 0.82);
+    const thumbnailUrl = await canvasToJpegObjectUrl(thumb.canvas, 0.82);
+    return { thumbnailUrl, displayUrl: objectUrl, width, height };
+  } finally {
+    bitmap.close();
+  }
+}
 
-    let displayUrl: string;
-    if (format === 'tiff') {
-      const disp = drawBitmapToCanvas(bitmap, previewMaxEdge);
-      const blob = await new Promise<Blob | null>((resolve) =>
-        disp.canvas.toBlob((b) => resolve(b), 'image/png')
-      );
-      displayUrl = blob ? URL.createObjectURL(blob) : objectUrl;
-    } else {
-      displayUrl = objectUrl;
-    }
-
-    return { thumbnailUrl, displayUrl, width, height };
+/**
+ * Lazy PNG blob URL for TIFF RAW panel (browser cannot use blob: file URL for many TIFFs).
+ */
+export async function generateTiffRawDisplayUrl(file: File, previewMaxEdge: number): Promise<string> {
+  const { bitmap } = await decodeImageFile(file, 'tiff');
+  try {
+    const disp = drawBitmapToCanvas(bitmap, previewMaxEdge);
+    const blob = await new Promise<Blob | null>((resolve) =>
+      disp.canvas.toBlob((b) => resolve(b), 'image/png')
+    );
+    return blob ? URL.createObjectURL(blob) : '';
   } finally {
     bitmap.close();
   }
@@ -154,7 +161,11 @@ export async function loadFullImageData(
     try {
       const buffer = await file.arrayBuffer();
       const { width: tw, height: th, rgba } = decodeTiff(buffer);
-      return new ImageData(new Uint8ClampedArray(rgba), tw, th);
+      return new ImageData(
+        new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength),
+        tw,
+        th
+      );
     } catch {
       // fall through to bitmap/canvas path
     }
@@ -188,19 +199,24 @@ function canvasBlob(
   });
 }
 
+async function blobToUint8(blob: Blob): Promise<Uint8Array> {
+  const ab = await blob.arrayBuffer();
+  return new Uint8Array(ab);
+}
+
 /**
  * Encode processed RGBA buffer to the same family as the original upload.
- * `alreadyCompressed` indicates the output is already internally compressed
- * (PNG/JPEG) so the caller can skip zip-level DEFLATE.
+ * Returns raw bytes for ZIP packaging (no Blob wrapper — avoids extra copies in export).
  */
 export async function encodeProcessedImage(
   processedPixels: Uint8ClampedArray,
   width: number,
   height: number,
   format: ImageFormat
-): Promise<{ data: Blob | ArrayBuffer; ext: string; alreadyCompressed: boolean }> {
+): Promise<{ data: Uint8Array; ext: string }> {
   if (format === 'tiff') {
-    return { data: encodeTiff(processedPixels, width, height), ext: '.tif', alreadyCompressed: false };
+    const ab = encodeTiff(processedPixels, width, height);
+    return { data: new Uint8Array(ab), ext: '.tif' };
   }
 
   const canvas = document.createElement('canvas');
@@ -208,19 +224,20 @@ export async function encodeProcessedImage(
   canvas.height = height;
   const ctx = canvas.getContext('2d');
   if (!ctx) {
-    return { data: encodeTiff(processedPixels, width, height), ext: '.tif', alreadyCompressed: false };
+    const ab = encodeTiff(processedPixels, width, height);
+    return { data: new Uint8Array(ab), ext: '.tif' };
   }
   const imageData = new ImageData(processedPixels, width, height);
   ctx.putImageData(imageData, 0, 0);
 
   if (format === 'jpeg') {
     const jpg = await canvasBlob(canvas, 'image/jpeg', 0.95);
-    if (jpg) return { data: jpg, ext: '.jpg', alreadyCompressed: true };
+    if (jpg) return { data: await blobToUint8(jpg), ext: '.jpg' };
     const png = await canvasBlob(canvas, 'image/png');
-    return { data: png!, ext: '.png', alreadyCompressed: true };
+    return { data: await blobToUint8(png!), ext: '.png' };
   }
   const blob = await canvasBlob(canvas, 'image/png');
-  return { data: blob!, ext: '.png', alreadyCompressed: true };
+  return { data: await blobToUint8(blob!), ext: '.png' };
 }
 
 export function exportBasename(name: string, ext: string): string {

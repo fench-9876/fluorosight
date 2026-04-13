@@ -1,7 +1,6 @@
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { flushSync } from 'react-dom';
-import JSZip from 'jszip';
 import { ProcessingParams, ColorMapType } from './types';
 import { INITIAL_PARAMS } from './constants';
 import { processImageData, getHistogram } from './services/imageUtils';
@@ -9,6 +8,7 @@ import { buildPresetPayload, parsePresetJson } from './services/paramPreset';
 import {
   detectFormat,
   generateThumbnail,
+  generateTiffRawDisplayUrl,
   generatePreviewFromFile,
   loadFullImageData,
   encodeProcessedImage,
@@ -16,6 +16,7 @@ import {
   type ImageFormat,
   type ImagePreview,
 } from './services/imageDecode';
+import { ZipStoreWriter, buildZipBlobFromParts, crc32 } from './services/zipStoreWriter';
 import Controls from './components/Controls';
 import Histogram from './components/Histogram';
 
@@ -30,9 +31,13 @@ interface ImageEntry {
   format: ImageFormat;
   width: number;
   height: number;
+  /** JPEG blob URL for gallery strip. */
   thumbnailUrl?: string;
-  /** Browser-displayable URL for RAW panel (TIFF uses a generated PNG blob URL). */
+  /** Original file blob URL (same as objectUrl). */
   displayUrl: string;
+  /** Lazy PNG blob URL for TIFF RAW panel only (generated on selection). */
+  tiffDisplayUrl?: string;
+  tiffRawDisplayFailed?: boolean;
   /** Dropped during ZIP export so preview buffers can be GC'd. */
   preview?: ImagePreview;
   loading: boolean;
@@ -40,11 +45,10 @@ interface ImageEntry {
   previewLoadFailed?: boolean;
 }
 
-function revokeEntryUrls(entry: Pick<ImageEntry, 'objectUrl' | 'displayUrl'>) {
+function revokeEntryUrls(entry: Pick<ImageEntry, 'objectUrl' | 'thumbnailUrl' | 'tiffDisplayUrl'>) {
   URL.revokeObjectURL(entry.objectUrl);
-  if (entry.displayUrl && entry.displayUrl !== entry.objectUrl) {
-    URL.revokeObjectURL(entry.displayUrl);
-  }
+  if (entry.thumbnailUrl) URL.revokeObjectURL(entry.thumbnailUrl);
+  if (entry.tiffDisplayUrl) URL.revokeObjectURL(entry.tiffDisplayUrl);
 }
 
 const App: React.FC = () => {
@@ -67,6 +71,8 @@ const App: React.FC = () => {
   const previewDebounceImageIdRef = useRef<string | null>(null);
   const imagesRef = useRef<ImageEntry[]>([]);
   const previewLoadGenRef = useRef(0);
+  const tiffRawLoadGenRef = useRef(0);
+  const prevSelectedIdRef = useRef<string | null>(null);
   imagesRef.current = images;
 
   const selectedImage = useMemo(() => images[selectedIndex] || null, [images, selectedIndex]);
@@ -90,6 +96,35 @@ const App: React.FC = () => {
     const t = window.setTimeout(() => setPreviewParams(params), 200);
     return () => window.clearTimeout(t);
   }, [params, selectedImage?.id]);
+
+  /** Invalidate in-flight TIFF RAW display loads when selection changes. */
+  useEffect(() => {
+    tiffRawLoadGenRef.current++;
+  }, [selectedImage?.id]);
+
+  /**
+   * When switching images: evict preview buffers and TIFF RAW blob from the previous entry
+   * so large ImageData / PNG blobs are not retained for every visited image.
+   */
+  useEffect(() => {
+    const curId = selectedImage?.id ?? null;
+    const prevId = prevSelectedIdRef.current;
+    if (prevId && prevId !== curId) {
+      setImages((prev) =>
+        prev.map((e) => {
+          if (e.id !== prevId) return e;
+          const next: ImageEntry = { ...e, preview: undefined, previewLoadFailed: undefined };
+          if (next.tiffDisplayUrl) {
+            URL.revokeObjectURL(next.tiffDisplayUrl);
+            next.tiffDisplayUrl = undefined;
+          }
+          next.tiffRawDisplayFailed = undefined;
+          return next;
+        })
+      );
+    }
+    prevSelectedIdRef.current = curId;
+  }, [selectedImage?.id]);
 
   /** Lazy-load preview ImageData when the selected image has no preview yet. */
   useEffect(() => {
@@ -121,6 +156,46 @@ const App: React.FC = () => {
       }
     })();
   }, [selectedImage?.id, selectedImage?.loading, selectedImage?.preview, selectedImage?.previewLoadFailed]);
+
+  /** Lazy PNG for TIFF RAW panel (browser often cannot render TIFF via object URL). */
+  useEffect(() => {
+    const img = selectedImage;
+    if (!img || img.loading || img.format !== 'tiff') return;
+    if (img.tiffDisplayUrl || img.tiffRawDisplayFailed) return;
+
+    const gen = tiffRawLoadGenRef.current;
+    void (async () => {
+      try {
+        const url = await generateTiffRawDisplayUrl(img.file, PREVIEW_MAX_EDGE);
+        if (gen !== tiffRawLoadGenRef.current) {
+          if (url) URL.revokeObjectURL(url);
+          return;
+        }
+        if (!url) {
+          setImages((prev) =>
+            prev.map((e) => (e.id === img.id ? { ...e, tiffRawDisplayFailed: true } : e))
+          );
+          return;
+        }
+        setImages((prev) =>
+          prev.map((e) =>
+            e.id === img.id ? { ...e, tiffDisplayUrl: url, tiffRawDisplayFailed: false } : e
+          )
+        );
+      } catch {
+        if (gen !== tiffRawLoadGenRef.current) return;
+        setImages((prev) =>
+          prev.map((e) => (e.id === img.id ? { ...e, tiffRawDisplayFailed: true } : e))
+        );
+      }
+    })();
+  }, [
+    selectedImage?.id,
+    selectedImage?.loading,
+    selectedImage?.format,
+    selectedImage?.tiffDisplayUrl,
+    selectedImage?.tiffRawDisplayFailed,
+  ]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -156,13 +231,13 @@ const App: React.FC = () => {
     e.target.value = '';
 
     void (async () => {
+      let index = 0;
       for (const entry of newEntries) {
         try {
           const { thumbnailUrl, displayUrl, width, height } = await generateThumbnail(
             entry.file,
             entry.format,
-            entry.objectUrl,
-            PREVIEW_MAX_EDGE
+            entry.objectUrl
           );
           setImages((prev) =>
             prev.map((e) =>
@@ -176,7 +251,11 @@ const App: React.FC = () => {
             prev.map((e) => (e.id === entry.id ? { ...e, loading: false } : e))
           );
         }
-        await new Promise<void>((r) => setTimeout(r, 0));
+        index++;
+        await new Promise<void>((r) => setTimeout(r, 50));
+        if (index % 5 === 0) {
+          await new Promise<void>((r) => setTimeout(r, 300));
+        }
       }
     })();
   };
@@ -224,12 +303,27 @@ const App: React.FC = () => {
   const downloadAllAsZip = async () => {
     if (images.length === 0) return;
 
-    const savedPreviews = new Map<string, { preview?: ImagePreview; previewLoadFailed?: boolean }>();
+    const savedState = new Map<
+      string,
+      {
+        preview?: ImagePreview;
+        previewLoadFailed?: boolean;
+        tiffDisplayUrl?: string;
+        tiffRawDisplayFailed?: boolean;
+      }
+    >();
     for (const img of images) {
-      savedPreviews.set(img.id, { preview: img.preview, previewLoadFailed: img.previewLoadFailed });
+      savedState.set(img.id, {
+        preview: img.preview,
+        previewLoadFailed: img.previewLoadFailed,
+        tiffDisplayUrl: img.tiffDisplayUrl,
+        tiffRawDisplayFailed: img.tiffRawDisplayFailed,
+      });
     }
 
-    const exportRows = images.map(({ preview: _omit, previewLoadFailed: _pf, ...row }) => row);
+    const exportRows = images.map(
+      ({ preview: _p, previewLoadFailed: _pf, tiffDisplayUrl: _t, tiffRawDisplayFailed: _tr, ...row }) => row
+    );
     const total = exportRows.length;
 
     setIsZipping(true);
@@ -242,6 +336,15 @@ const App: React.FC = () => {
 
     const yieldToMain = () => new Promise<void>((r) => setTimeout(r, 0));
 
+    const suggestedName = `FluoroSight_Export_${Date.now()}.zip`;
+
+    const win = window as Window & {
+      showSaveFilePicker?: (options?: {
+        suggestedName?: string;
+        types?: Array<{ description: string; accept: Record<string, string[]> }>;
+      }) => Promise<FileSystemFileHandle>;
+    };
+
     try {
       flushSync(() => {
         setImages(exportRows);
@@ -249,43 +352,11 @@ const App: React.FC = () => {
 
       await waitForPaint();
 
-      const zip = new JSZip();
-
-      for (let i = 0; i < exportRows.length; i++) {
-        const row = exportRows[i];
-        const full = await loadFullImageData(row.file, row.format, row.width, row.height);
-        if (!full) continue;
-        const processedPixels = processImageData(full.data, row.width, row.height, params);
-        const { data, ext, alreadyCompressed } = await encodeProcessedImage(
-          processedPixels,
-          row.width,
-          row.height,
-          row.format
-        );
-        const filename = exportBasename(row.name, ext);
-        zip.file(filename, data, alreadyCompressed ? { compression: 'STORE' } : {});
-        setExportProgress(Math.round(((i + 1) / total) * 70));
-        await yieldToMain();
-      }
-
-      const content = await zip.generateAsync({ type: 'blob' }, (meta) => {
-        const p = typeof meta.percent === 'number' ? meta.percent : 0;
-        setExportProgress(70 + Math.round((p / 100) * 30));
-      });
-
-      const suggestedName = `FluoroSight_Export_${Date.now()}.zip`;
-
-      const win = window as Window & {
-        showSaveFilePicker?: (options?: {
-          suggestedName?: string;
-          types?: Array<{ description: string; accept: Record<string, string[]> }>;
-        }) => Promise<FileSystemFileHandle>;
-      };
-
-      let saved = false;
+      /** Pick save location first (Chrome/Edge). Streaming writes one image at a time. */
+      let fileHandle: FileSystemFileHandle | null = null;
       if (typeof win.showSaveFilePicker === 'function') {
         try {
-          const handle = await win.showSaveFilePicker({
+          fileHandle = await win.showSaveFilePicker({
             suggestedName,
             types: [
               {
@@ -294,19 +365,60 @@ const App: React.FC = () => {
               },
             ],
           });
-          const writable = await handle.createWritable();
-          await writable.write(content);
-          await writable.close();
-          saved = true;
         } catch (err) {
           if (err instanceof DOMException && err.name === 'AbortError') {
-            saved = true;
+            return;
           }
         }
       }
 
-      if (!saved) {
-        const blobUrl = URL.createObjectURL(content);
+      const processOne = async (row: (typeof exportRows)[0]) => {
+        const full = await loadFullImageData(row.file, row.format, row.width, row.height);
+        if (!full) return null;
+        const processedPixels = processImageData(full.data, row.width, row.height, params);
+        const { data, ext } = await encodeProcessedImage(
+          processedPixels,
+          row.width,
+          row.height,
+          row.format
+        );
+        return { filename: exportBasename(row.name, ext), data };
+      };
+
+      if (fileHandle) {
+        const writable = await fileHandle.createWritable();
+        const writer = writable.getWriter();
+        const zipWriter = new ZipStoreWriter(writer);
+        try {
+          for (let i = 0; i < exportRows.length; i++) {
+            const out = await processOne(exportRows[i]);
+            if (out) await zipWriter.addFile(out.filename, out.data);
+            setExportProgress(Math.round(((i + 1) / total) * 95));
+            await yieldToMain();
+          }
+          await zipWriter.finalize();
+        } catch (err) {
+          await writer.abort().catch(() => {});
+          throw err;
+        }
+      } else {
+        const zipParts: Array<{ filename: string; crc: number; data: Blob }> = [];
+        for (let i = 0; i < exportRows.length; i++) {
+          const out = await processOne(exportRows[i]);
+          if (out) {
+            const c = crc32(out.data);
+            zipParts.push({
+              filename: out.filename,
+              crc: c,
+              data: new Blob([out.data]),
+            });
+          }
+          setExportProgress(Math.round(((i + 1) / total) * 95));
+          await yieldToMain();
+        }
+        setExportProgress(96);
+        const zipBlob = buildZipBlobFromParts(zipParts);
+        const blobUrl = URL.createObjectURL(zipBlob);
         const link = document.createElement('a');
         link.href = blobUrl;
         link.download = suggestedName;
@@ -321,7 +433,7 @@ const App: React.FC = () => {
       setImages(
         exportRows.map((r) => ({
           ...r,
-          ...savedPreviews.get(r.id),
+          ...savedState.get(r.id),
         }))
       );
     }
@@ -413,13 +525,19 @@ const App: React.FC = () => {
     URL.revokeObjectURL(blobUrl);
   };
 
-  const viewerBusy =
+  /** RAW panel: thumbnail loading or lazy TIFF PNG for display. */
+  const rawPanelBusy =
     !!selectedImage &&
     (selectedImage.loading ||
-      previewLoading ||
-      (!selectedImage.preview &&
-        !selectedImage.loading &&
-        !selectedImage.previewLoadFailed));
+      (selectedImage.format === 'tiff' &&
+        !selectedImage.tiffRawDisplayFailed &&
+        !selectedImage.tiffDisplayUrl));
+
+  /** Enhanced panel: downscaled preview ImageData for processing. */
+  const enhancedPanelBusy =
+    !!selectedImage &&
+    (previewLoading ||
+      (!selectedImage.preview && !selectedImage.loading && !selectedImage.previewLoadFailed));
 
   return (
     <div ref={containerRef} className="flex h-screen w-screen overflow-hidden bg-slate-950 font-sans transition-all duration-500">
@@ -612,14 +730,22 @@ const App: React.FC = () => {
                     </div>
                   )}
                   <div className="flex-1 flex items-center justify-center p-4 relative min-h-[120px]">
-                    {viewerBusy ? (
+                    {rawPanelBusy ? (
                       <div className="flex flex-col items-center gap-3 text-slate-500">
                         <i className="fas fa-circle-notch fa-spin text-3xl text-emerald-500/80"></i>
                         <span className="text-xs">Loading image…</span>
                       </div>
+                    ) : selectedImage.tiffRawDisplayFailed ? (
+                      <div className="text-center text-sm text-red-400/90 px-4">
+                        Could not decode TIFF for RAW display.
+                      </div>
                     ) : (
                       <img
-                        src={selectedImage.displayUrl}
+                        src={
+                          selectedImage.format === 'tiff'
+                            ? (selectedImage.tiffDisplayUrl ?? '')
+                            : selectedImage.displayUrl
+                        }
                         className="max-w-full max-h-full object-contain"
                         alt="Raw"
                       />
@@ -646,7 +772,7 @@ const App: React.FC = () => {
                     <div className="text-center text-sm text-red-400/90 px-4">
                       Could not decode preview for this image.
                     </div>
-                  ) : viewerBusy || !selectedImage.preview ? (
+                  ) : enhancedPanelBusy ? (
                     <div className="flex flex-col items-center gap-3 text-slate-500">
                       <i className="fas fa-circle-notch fa-spin text-3xl text-emerald-500/80"></i>
                       <span className="text-xs">Preparing preview…</span>
