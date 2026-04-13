@@ -44,37 +44,40 @@ export const processImageData = (
     }
   }
 
-  // 3. Smooth Background Subtraction (Separable 2D Box Blur)
+  // 3. Smooth Background Subtraction (Separable 2D Box Blur via running-sum, O(n) per pass)
   if (bgSubtraction > 0) {
     const radius = Math.max(2, Math.floor(bgSubtraction / 4));
     const hBlur = new Float32Array(size);
     const fullBlur = new Float32Array(size);
 
     for (let y = 0; y < height; y++) {
+      const rowOff = y * width;
+      let sum = 0;
+      const left0 = Math.min(radius, width - 1);
+      for (let x = 0; x <= left0; x++) sum += intensities[rowOff + x];
       for (let x = 0; x < width; x++) {
-        let sum = 0, count = 0;
-        for (let dx = -radius; dx <= radius; dx++) {
-          const nx = x + dx;
-          if (nx >= 0 && nx < width) {
-            sum += intensities[y * width + nx];
-            count++;
-          }
-        }
-        hBlur[y * width + x] = sum / count;
+        const rEdge = x + radius;
+        const lEdge = x - radius - 1;
+        if (rEdge < width) sum += intensities[rowOff + rEdge];
+        if (lEdge >= 0)    sum -= intensities[rowOff + lEdge];
+        const lo = Math.max(0, x - radius);
+        const hi = Math.min(width - 1, x + radius);
+        hBlur[rowOff + x] = sum / (hi - lo + 1);
       }
     }
 
     for (let x = 0; x < width; x++) {
+      let sum = 0;
+      const top0 = Math.min(radius, height - 1);
+      for (let y = 0; y <= top0; y++) sum += hBlur[y * width + x];
       for (let y = 0; y < height; y++) {
-        let sum = 0, count = 0;
-        for (let dy = -radius; dy <= radius; dy++) {
-          const ny = y + dy;
-          if (ny >= 0 && ny < height) {
-            sum += hBlur[ny * width + x];
-            count++;
-          }
-        }
-        fullBlur[y * width + x] = sum / count;
+        const bEdge = y + radius;
+        const tEdge = y - radius - 1;
+        if (bEdge < height) sum += hBlur[bEdge * width + x];
+        if (tEdge >= 0)     sum -= hBlur[tEdge * width + x];
+        const lo = Math.max(0, y - radius);
+        const hi = Math.min(height - 1, y + radius);
+        fullBlur[y * width + x] = sum / (hi - lo + 1);
       }
     }
 
