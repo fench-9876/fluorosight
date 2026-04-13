@@ -26,19 +26,26 @@ function canvasToJpegDataUrl(canvas: HTMLCanvasElement, quality = 0.85): string 
 }
 
 /**
- * Decode file to ImageBitmap. TIFF uses utif2; others use createImageBitmap.
+ * Decode file to ImageBitmap. TIFF uses utif2 with native fallback; others use createImageBitmap.
  */
 export async function decodeImageFile(
   file: File,
   format: ImageFormat
 ): Promise<{ bitmap: ImageBitmap; width: number; height: number }> {
   if (format === 'tiff') {
-    const buffer = await file.arrayBuffer();
-    const { width, height, rgba } = decodeTiff(buffer);
-    const copy = new Uint8ClampedArray(rgba);
-    const imageData = new ImageData(copy, width, height);
-    const bitmap = await createImageBitmap(imageData);
-    return { bitmap, width, height };
+    try {
+      const buffer = await file.arrayBuffer();
+      const { width, height, rgba } = decodeTiff(buffer);
+      const copy = new Uint8ClampedArray(rgba);
+      const imageData = new ImageData(copy, width, height);
+      const bitmap = await createImageBitmap(imageData);
+      return { bitmap, width, height };
+    } catch {
+      // utif2 can't handle this TIFF variant; try native browser decode
+      // (works on Edge/Safari which have system TIFF codecs)
+      const bitmap = await createImageBitmap(file);
+      return { bitmap, width: bitmap.width, height: bitmap.height };
+    }
   }
 
   const bitmap = await createImageBitmap(file);
@@ -135,6 +142,7 @@ export async function generatePreviewFromFile(
 /**
  * Full-resolution ImageData for export.
  * TIFF fast-path: returns decoded RGBA directly without bitmap/canvas round-trip.
+ * Falls back to bitmap/canvas if utif2 can't handle the TIFF variant.
  */
 export async function loadFullImageData(
   file: File,
@@ -143,9 +151,13 @@ export async function loadFullImageData(
   height: number
 ): Promise<ImageData | null> {
   if (format === 'tiff') {
-    const buffer = await file.arrayBuffer();
-    const { width: tw, height: th, rgba } = decodeTiff(buffer);
-    return new ImageData(new Uint8ClampedArray(rgba), tw, th);
+    try {
+      const buffer = await file.arrayBuffer();
+      const { width: tw, height: th, rgba } = decodeTiff(buffer);
+      return new ImageData(new Uint8ClampedArray(rgba), tw, th);
+    } catch {
+      // fall through to bitmap/canvas path
+    }
   }
 
   const bitmap = await createImageBitmap(file);

@@ -17,8 +17,8 @@ type UtifIfd = Record<string, number[] | undefined> & {
 };
 
 /**
- * Decode first/largest RGB(A) page from a TIFF buffer to RGBA8.
- * Page selection mirrors utif2's bufferToURI helper.
+ * Decode first/largest image page from a TIFF buffer to RGBA8.
+ * Handles both RGB and grayscale (common in fluorescence microscopy).
  */
 export function decodeTiff(buffer: ArrayBuffer): DecodedTiff {
   const ifds = UTIF.decode(buffer) as UtifIfd[];
@@ -31,12 +31,14 @@ export function decodeTiff(buffer: ArrayBuffer): DecodedTiff {
     vsns = vsns.concat(ifds[0].subIFD);
   }
 
+  // Pick the largest page that has pixel dimensions, regardless of channel count.
+  // Fluorescence microscopy TIFFs are typically single-channel grayscale.
   let page: UtifIfd = ifds[0];
   let maxArea = 0;
   for (let i = 0; i < vsns.length; i++) {
     const img = vsns[i];
-    if (!img.t258 || img.t258.length < 3) continue;
-    const ar = (img.t256?.[0] ?? 0) * (img.t257?.[0] ?? 0);
+    if (!img.t256 || !img.t257) continue;
+    const ar = (img.t256[0] ?? 0) * (img.t257[0] ?? 0);
     if (ar > maxArea) {
       maxArea = ar;
       page = img;
