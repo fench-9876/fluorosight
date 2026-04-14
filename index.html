@@ -28,6 +28,24 @@
             -ms-overflow-style: none;
             scrollbar-width: none;
         }
+        /* Styled scrollbar for gallery strip */
+        .gallery-scrollbar {
+            scrollbar-width: thin;
+            scrollbar-color: #334155 transparent;
+        }
+        .gallery-scrollbar::-webkit-scrollbar {
+            height: 6px;
+        }
+        .gallery-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .gallery-scrollbar::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 3px;
+        }
+        .gallery-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #10b981;
+        }
     </style>
 <script type="importmap">
 {
