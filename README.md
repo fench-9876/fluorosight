@@ -85,9 +85,6 @@ npm run preview
 
 `npm run build` writes static assets to `dist/`; serve that folder with any static host.
 
-## Environment variables
-
-`vite.config.ts` exposes `GEMINI_API_KEY` from `.env` / `.env.local` as `process.env.GEMINI_API_KEY` and `process.env.API_KEY` for compatibility with templates. **The current FluoroSight UI does not call the Gemini API**; image processing is entirely client-side. You can omit `.env.local` unless you add your own code that reads those variables.
 
 ## Scripts (`package.json`)
 
