@@ -790,7 +790,7 @@ const App: React.FC = () => {
         {images.length > 0 && !isFocusMode && (
           <footer className="h-64 border-t border-slate-800 bg-slate-900/30 flex flex-col shrink-0 z-30 overflow-hidden">
             {/* Gallery Strip */}
-            <div className="h-24 bg-slate-950/50 border-b border-slate-800 px-6 flex items-center gap-4 overflow-x-auto scrollbar-hide py-2">
+            <div className="h-24 bg-slate-950/50 border-b border-slate-800 px-6 flex items-center gap-4 overflow-x-auto gallery-scrollbar py-2">
               {images.map((img, idx) => (
                 <div
                   key={img.id}
