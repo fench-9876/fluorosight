@@ -301,6 +301,24 @@ const App: React.FC = () => {
   }, [updateProcessedView]);
 
   const downloadAllAsZip = async () => {
+    if (imagesRef.current.length === 0) return;
+
+    if (imagesRef.current.some((img) => img.loading)) {
+      setIsZipping(true);
+      setExportProgress(0);
+      await new Promise<void>((resolve) => {
+        const check = () => {
+          if (imagesRef.current.every((img) => !img.loading)) {
+            resolve();
+          } else {
+            setTimeout(check, 200);
+          }
+        };
+        check();
+      });
+    }
+
+    const images = imagesRef.current;
     if (images.length === 0) return;
 
     const savedState = new Map<
@@ -647,16 +665,25 @@ const App: React.FC = () => {
               )}
               {isZipping && (
                 <div className="flex flex-col gap-1.5 min-w-[200px] max-w-xs">
-                  <span className="flex items-center gap-2 text-xs text-blue-400">
-                    <i className="fas fa-file-archive animate-pulse"></i>
-                    Exporting… {exportProgress}%
-                  </span>
-                  <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-blue-500 transition-[width] duration-150 ease-out"
-                      style={{ width: `${exportProgress}%` }}
-                    />
-                  </div>
+                  {images.some((img) => img.loading) ? (
+                    <span className="flex items-center gap-2 text-xs text-blue-400">
+                      <i className="fas fa-circle-notch fa-spin"></i>
+                      Waiting for uploading to complete
+                    </span>
+                  ) : (
+                    <>
+                      <span className="flex items-center gap-2 text-xs text-blue-400">
+                        <i className="fas fa-file-archive animate-pulse"></i>
+                        Exporting… {exportProgress}%
+                      </span>
+                      <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-blue-500 transition-[width] duration-150 ease-out"
+                          style={{ width: `${exportProgress}%` }}
+                        />
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
               <div className="h-4 w-px bg-slate-800 mx-2"></div>
